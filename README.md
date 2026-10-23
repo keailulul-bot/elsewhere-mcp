@@ -71,6 +71,35 @@ venv/bin/python server.py
 
 注意：FastMCP 只接受本机 Host 头，反向代理要加 `proxy_set_header Host 127.0.0.1:8787;` 和 `proxy_set_header Origin "";`，否则会返回 421。
 
+### 接到 Claude 上 / Connect to Claude
+
+**Claude Desktop**（本地运行，不需要服务器）：打开 Settings → Developer → Edit Config，在 `claude_desktop_config.json` 里加：
+
+```json
+{
+  "mcpServers": {
+    "elsewhere": {
+      "command": "/你的路径/elsewhere-mcp/venv/bin/python",
+      "args": ["/你的路径/elsewhere-mcp/server.py"],
+      "env": {
+        "TRANSPORT": "stdio",
+        "WINDY_API_KEY": "你的 Windy key"
+      }
+    }
+  }
+}
+```
+
+Windows 上 python 路径是 `venv\Scripts\python.exe`。保存后完全退出 Claude Desktop 再打开。
+
+**Claude Code**：
+
+```bash
+claude mcp add elsewhere -e TRANSPORT=stdio -e WINDY_API_KEY=你的key -- /你的路径/venv/bin/python /你的路径/server.py
+```
+
+**claude.ai 网页版 / 手机 App**：需要把服务部署到有 HTTPS 域名的服务器上，再在 Settings → Connectors 里添加自定义连接器，地址填 `https://你的域名/mcp`。
+
 ### 需要准备的东西
 
 - **Windy API key**（必填）：<https://api.windy.com/keys>
@@ -101,6 +130,16 @@ venv/bin/python server.py
 - [movebank/movebank-api-doc](https://github.com/movebank/movebank-api-doc)：Movebank 官方接口文档
 
 本项目和上面的服务器代码彼此独立。多做的部分是：按日出日落找摄像头、Movebank 野生动物追踪、天气，以及把画面直接显示给用户的 `show`。
+
+---
+
+## 致谢与参考 / Acknowledgements
+
+代码是对照各家官方接口文档从头写的，没有复制其他开源项目的代码。用到的东西：
+
+- 依赖库：[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)（FastMCP，MIT）、[httpx](https://github.com/encode/httpx)（BSD-3-Clause）
+- 接口：[Windy Webcams API v3](https://api.windy.com/webcams/docs)、[Movebank REST API](https://github.com/movebank/movebank-api-doc)、[Open-Meteo](https://open-meteo.com/en/docs)、[GitHub REST API](https://docs.github.com/rest)、[jsDelivr](https://www.jsdelivr.com)
+- `where_sun_is` 的太阳位置用的是教科书里的近似公式：太阳赤纬 δ ≈ 23.44° × sin(360°/365 × (d − 81))，日出时角 cos h = −tan φ · tan δ
 
 ---
 

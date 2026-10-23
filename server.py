@@ -450,4 +450,5 @@ async def weather_at(lat: float, lon: float) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    # 默认跑成网络服务；Claude Desktop 这类本地客户端用 TRANSPORT=stdio
+    mcp.run(transport=os.getenv("TRANSPORT", "streamable-http"))
