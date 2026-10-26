@@ -6,7 +6,11 @@ import time
 import datetime as dt
 
 import httpx
+import jwt
+from jwt import PyJWKClient
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 
 API_KEY = os.environ["WINDY_API_KEY"]
 BASE = "https://api.windy.com/webcams/api/v3"
@@ -14,10 +18,55 @@ INCLUDE = "location,images,player,urls,categories"
 GH_TOKEN = os.getenv("GH_TOKEN")
 GH_REPO = os.getenv("GH_REPO")  # 公开仓库，如 yourname/your-snaps，show 工具用
 
+class WorkOSTokenVerifier:
+    def __init__(self, issuer: str, resource: str, allowed_users: set[str]):
+        self.issuer = issuer
+        self.resource = resource
+        self.allowed_users = allowed_users
+        self.keys = PyJWKClient(f"{issuer}/oauth2/jwks", cache_jwk_set=True, timeout=5)
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        try:
+            key = await asyncio.to_thread(self.keys.get_signing_key_from_jwt, token)
+            claims = jwt.decode(
+                token, key.key, algorithms=["RS256"], issuer=self.issuer,
+                audience=self.resource,
+                options={"require": ["iss", "aud", "exp", "iat", "sub", "scope", "client_id", "sid"]},
+            )
+            scopes = claims["scope"].split()
+            if (claims["sub"] not in self.allowed_users or "openid" not in scopes
+                    or not isinstance(claims["client_id"], str)
+                    or not claims["client_id"] or not isinstance(claims["sid"], str)
+                    or not claims["sid"]):
+                return None
+            return AccessToken(
+                token=token, client_id=claims["client_id"], scopes=scopes,
+                expires_at=claims["exp"], resource=self.resource,
+                subject=claims["sub"], claims=claims,
+            )
+        except Exception:
+            # Invalid tokens and unavailable signing keys both fail closed.
+            return None
+
+
+auth_options = {}
+if os.getenv("TRANSPORT", "streamable-http") != "stdio":
+    issuer = os.getenv("WORKOS_ISSUER", "").rstrip("/")
+    resource = os.getenv("MCP_PUBLIC_URL", "").rstrip("/")
+    allowed_users = {x.strip() for x in os.getenv("WORKOS_ALLOWED_USER_IDS", "").split(",") if x.strip()}
+    if not issuer.startswith("https://") or not resource.startswith("https://") or not resource.endswith("/mcp") or not allowed_users:
+        raise RuntimeError("HTTP mode requires WORKOS_ISSUER, MCP_PUBLIC_URL and WORKOS_ALLOWED_USER_IDS")
+    auth_options = {
+        "auth": AuthSettings(issuer_url=issuer, resource_server_url=resource,
+                             required_scopes=["openid"], validate_token_resource=True),
+        "token_verifier": WorkOSTokenVerifier(issuer, resource, allowed_users),
+    }
+
 mcp = FastMCP(
     "webcam",
     host=os.getenv("HOST", "127.0.0.1"),
     port=int(os.getenv("PORT", "8787")),
+    **auth_options,
 )
 
 

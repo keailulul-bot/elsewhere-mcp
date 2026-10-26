@@ -62,14 +62,26 @@ An MCP server that lets an AI look at the world: public webcams everywhere, wher
 ```bash
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
-cp .env.example .env   # 填上你自己的 key
+cp .env.example .env   # 填上自己的 key；HTTP 模式还需填 WorkOS 配置
 set -a; . ./.env; set +a
 venv/bin/python server.py
 ```
 
-服务跑在 `http://127.0.0.1:8787/mcp`（streamable HTTP）。要给远程客户端用，放在 nginx 之类的反向代理后面，并加上 HTTPS。
+远程 HTTP 模式必须配置下文的 WorkOS 认证；本地 Claude Desktop 可使用 `TRANSPORT=stdio`，无需 HTTP 认证。
 
-注意：FastMCP 只接受本机 Host 头，反向代理要加 `proxy_set_header Host 127.0.0.1:8787;` 和 `proxy_set_header Origin "";`，否则会返回 421。
+### Render + ChatGPT（WorkOS AuthKit）
+
+1. 在 GitHub 打开本仓库，点击 **Fork** 到自己的账号，将本地修改后的文件复制进 Fork 并提交。Render 的 Repository 选你的 Fork；关闭 Auto-Deploy，确认配置后再手动部署。不要把 `.env` 或密钥提交到 GitHub。
+2. 在 WorkOS 创建 AuthKit 环境，先创建自己的 AuthKit 应用用户（或先通过 AuthKit 注册一次），从 Users 页面记录该用户的 **user ID**（不是邮箱），然后在 Authentication 中关闭公开 Sign up。WorkOS Dashboard 管理员账号与 AuthKit 应用用户是不同身份。即使其他用户存在，服务端仍只接受 `WORKOS_ALLOWED_USER_IDS` 白名单中的 ID。
+3. 在 WorkOS **Connect → Configuration** 启用 Client ID Metadata Document (CIMD)。将 `https://你的服务名.onrender.com/mcp` 添加为 Resource Indicator；可将它设为 default。若 ChatGPT 连接页面选择 DCR，则也要启用 Dynamic Client Registration。WorkOS 托管授权、令牌、注册与 PKCE 端点，本服务只验证令牌。
+4. Render Web Service 使用 Python 3.11+、Free、`pip install -r requirements.txt`、`python server.py`。环境变量：`WINDY_API_KEY`、`HOST=0.0.0.0`、`PORT=10000`、`WORKOS_ISSUER=https://你的-authkit-域名`、`MCP_PUBLIC_URL=https://你的服务名.onrender.com/mcp`、`WORKOS_ALLOWED_USER_IDS=user_...`。`WORKOS_ISSUER` 必须与 WorkOS discovery 的 `issuer` 完全相同。可选的 `GH_TOKEN`/`GH_REPO` 和 Movebank 凭据只放 Render 环境变量中。
+5. 部署并确认 `/mcp` 无令牌返回 401 且 `WWW-Authenticate` 指向 OAuth metadata。ChatGPT 自定义 MCP 选择 **OAuth**，地址填写 `https://你的服务名.onrender.com/mcp`；优先选 CIMD。首次连接按 WorkOS 页面登录授权。
+
+服务使用官方 MCP Python SDK 发布 protected resource metadata；WorkOS 发布 authorization server metadata，包含注册端点和 PKCE `S256`。所有 HTTP 工具请求必须通过 WorkOS JWKS 签名、issuer、audience、到期时间、`openid` scope 和 user ID 白名单校验。WorkOS CIMD/DCR 客户端默认只获得标准 OIDC scopes，因此这里用 `openid` 加服务端 user ID 白名单作为单人权限边界，不依赖邮箱或自定义 scope。修改白名单后重启服务；已签发令牌也会立即被新白名单拒绝。
+
+Render Free 服务闲置 15 分钟会休眠，重新唤醒约需一分钟，ChatGPT 首次扫描或调用可能超时；重试通常可行，但若需要稳定即时响应须使用非休眠实例。
+
+WorkOS 公开定价显示 AuthKit 低用量可免费使用，但启用生产环境时应在 WorkOS Dashboard 确认当前账单条款。本仓库无法在没有你的 WorkOS 环境和 ChatGPT 连接的情况下验证实际登录回调。
 
 ### 接到 Claude 上 / Connect to Claude
 
