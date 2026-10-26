@@ -52,17 +52,77 @@ class ImageTests(unittest.IsolatedAsyncioTestCase):
         ):
             return await server._snapshot_bytes("camera-1")
 
-    async def test_show_returns_mcp_image_content_without_github_settings(self):
+    async def test_look_still_returns_mcp_image_content_for_the_model(self):
         with patch.object(server, "_snapshot_bytes", new=AsyncMock(return_value=(
             {"id": "camera-1"}, TEST_IMAGE, "png"
         ))):
-            result = await server.mcp.call_tool("show", {"webcam_id": "camera-1"})
+            result = await server.mcp.call_tool("look", {"webcam_id": "camera-1"})
         self.assertEqual(len(result), 1)
         self.assertIsInstance(result[0], ImageContent)
         self.assertEqual(result[0].mimeType, "image/png")
         self.assertEqual(base64.b64decode(result[0].data), TEST_IMAGE)
+
+    async def test_show_returns_structured_output_for_inline_widget(self):
+        webcam = {
+            "id": "camera-1",
+            "title": "Sunset Beach",
+            "city": "Perth",
+            "region": "Western Australia",
+            "country": "Australia",
+            "snapshot": "https://images-webcams.windy.com/12/camera-1/current/preview/camera-1.jpg?token=fresh",
+            "page": "https://www.windy.com/webcams/camera-1",
+            "last_updated": "2026-10-26T12:00:00Z",
+        }
+        with patch.object(server, "get_webcam", new=AsyncMock(return_value=webcam)):
+            content, structured = await server.mcp.call_tool(
+                "show", {"webcam_id": "camera-1"}
+            )
+
+        self.assertTrue(content)
+        self.assertEqual(structured["webcam_id"], "camera-1")
+        self.assertEqual(structured["title"], "Sunset Beach")
+        self.assertEqual(structured["location"], "Perth, Western Australia, Australia")
+        self.assertEqual(structured["snapshot"], webcam["snapshot"])
+        self.assertEqual(structured["provider"], "Windy.com")
         self.assertFalse(hasattr(server, "GH_TOKEN"))
         self.assertFalse(hasattr(server, "GH_REPO"))
+
+    async def test_show_rejects_non_windy_image_host(self):
+        with patch.object(server, "get_webcam", new=AsyncMock(return_value={
+            "id": "camera-1",
+            "snapshot": "https://example.test/not-trusted.jpg",
+        })):
+            with self.assertRaisesRegex(ValueError, "没有可安全显示的画面"):
+                await server.show("camera-1")
+
+    async def test_show_tool_is_bound_to_mcp_app_resource(self):
+        tools = [tool.model_dump(by_alias=True) for tool in await server.mcp.list_tools()]
+        show = next(tool for tool in tools if tool["name"] == "show")
+        self.assertEqual(
+            show["_meta"]["ui"]["resourceUri"], server.WEBCAM_WIDGET_URI
+        )
+        self.assertEqual(
+            show["_meta"]["openai/outputTemplate"], server.WEBCAM_WIDGET_URI
+        )
+        self.assertIsNotNone(show["outputSchema"])
+
+        resources = [
+            resource.model_dump(by_alias=True)
+            for resource in await server.mcp.list_resources()
+        ]
+        widget = next(
+            resource for resource in resources
+            if str(resource["uri"]) == server.WEBCAM_WIDGET_URI
+        )
+        self.assertEqual(widget["mimeType"], "text/html;profile=mcp-app")
+        self.assertIn(
+            server.WINDY_IMAGE_ORIGIN,
+            widget["_meta"]["ui"]["csp"]["resourceDomains"],
+        )
+
+        contents = list(await server.mcp.read_resource(server.WEBCAM_WIDGET_URI))
+        self.assertEqual(contents[0].mime_type, "text/html;profile=mcp-app")
+        self.assertIn("ui/notifications/tool-result", contents[0].content)
 
     async def test_search_by_country_keeps_existing_query(self):
         webcam = {"webcamId": "camera-1", "status": "active",
