@@ -5,12 +5,15 @@ import asyncio
 import time
 import datetime as dt
 import logging
+from urllib.parse import urlparse
 
 import httpx
 import jwt
 from jwt import PyJWKClient
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.auth.provider import AccessToken
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel
 from mcp.server.auth.settings import AuthSettings
 
 # Windy snapshot URLs may carry short-lived image tokens in their query string.
@@ -107,6 +110,232 @@ SNAPSHOT_TYPES = {
     "image/webp": "webp",
 }
 
+WEBCAM_WIDGET_URI = "ui://elsewhere/webcam.html"
+WINDY_IMAGE_ORIGIN = "https://images-webcams.windy.com"
+WEBCAM_WIDGET_META = {
+    "ui": {
+        "prefersBorder": False,
+        "csp": {
+            "resourceDomains": [WINDY_IMAGE_ORIGIN],
+        },
+    },
+    "openai/ui": {"availableDisplayModes": ["inline"]},
+    "openai/widgetDescription": "显示一张来自 Windy.com 的实时公共摄像头画面。",
+    "openai/widgetPrefersBorder": False,
+    "openai/widgetCSP": {
+        "resource_domains": [WINDY_IMAGE_ORIGIN],
+        "redirect_domains": ["https://www.windy.com"],
+    },
+}
+SHOW_TOOL_META = {
+    "ui": {"resourceUri": WEBCAM_WIDGET_URI},
+    "openai/outputTemplate": WEBCAM_WIDGET_URI,
+    "openai/toolInvocation/invoking": "正在看向远方…",
+    "openai/toolInvocation/invoked": "拍到了",
+}
+
+
+class WebcamCard(BaseModel):
+    webcam_id: str
+    title: str | None = None
+    location: str | None = None
+    snapshot: str
+    page: str | None = None
+    last_updated: str | None = None
+    provider: str = "Windy.com"
+
+
+WEBCAM_WIDGET_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>此刻的远方</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; background: transparent; }
+    body { padding: 2px; }
+    #status {
+      min-height: 180px;
+      display: grid;
+      place-items: center;
+      color: #6b7280;
+      font-size: 14px;
+    }
+    #card { width: 100%; }
+    #picture {
+      display: block;
+      position: relative;
+      overflow: hidden;
+      width: 100%;
+      min-height: 180px;
+      border-radius: 16px;
+      background: #111827;
+      color: inherit;
+      text-decoration: none;
+    }
+    #image {
+      display: block;
+      width: 100%;
+      height: auto;
+      max-height: 72vh;
+      object-fit: contain;
+      background: #111827;
+    }
+    #credit {
+      position: absolute;
+      right: 9px;
+      bottom: 8px;
+      padding: 4px 7px;
+      border-radius: 999px;
+      color: white;
+      background: rgba(0, 0, 0, .52);
+      font-size: 11px;
+      line-height: 1;
+      backdrop-filter: blur(4px);
+    }
+    #caption {
+      padding: 10px 3px 2px;
+    }
+    #title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+      line-height: 1.35;
+    }
+    #location {
+      margin: 3px 0 0;
+      color: #6b7280;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    @media (prefers-color-scheme: dark) {
+      #status, #location { color: #9ca3af; }
+    }
+  </style>
+</head>
+<body>
+  <div id="status">正在把远处的光带过来…</div>
+  <main id="card" hidden>
+    <a id="picture" target="_blank" rel="noopener noreferrer">
+      <img id="image" alt="">
+      <span id="credit">Webcam · Windy.com</span>
+    </a>
+    <section id="caption">
+      <p id="title"></p>
+      <p id="location"></p>
+    </section>
+  </main>
+  <script>
+    const statusEl = document.getElementById("status");
+    const cardEl = document.getElementById("card");
+    const pictureEl = document.getElementById("picture");
+    const imageEl = document.getElementById("image");
+    const titleEl = document.getElementById("title");
+    const locationEl = document.getElementById("location");
+
+    function safeUrl(value, allowedHost) {
+      try {
+        const url = new URL(String(value || ""));
+        if (url.protocol !== "https:" || url.hostname !== allowedHost) return null;
+        return url.href;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function render(response) {
+      const output = response?.structuredContent || response;
+      if (!output) return;
+
+      const snapshot = safeUrl(output.snapshot, "images-webcams.windy.com");
+      if (!snapshot) {
+        statusEl.textContent = "这台摄像头暂时没有可显示的画面";
+        return;
+      }
+
+      const page = safeUrl(output.page, "www.windy.com");
+      imageEl.src = snapshot;
+      imageEl.alt = output.title ? String(output.title) : "实时公共摄像头画面";
+      titleEl.textContent = output.title ? String(output.title) : "此刻的远方";
+      locationEl.textContent = output.location ? String(output.location) : "";
+      pictureEl.href = page || snapshot;
+      statusEl.hidden = true;
+      cardEl.hidden = false;
+    }
+
+    imageEl.addEventListener("error", () => {
+      cardEl.hidden = true;
+      statusEl.hidden = false;
+      statusEl.textContent = "画面刚刚过期了，再叫我看一次就好";
+    });
+
+    let nextRequestId = 1;
+    const pending = new Map();
+
+    function request(method, params) {
+      const id = nextRequestId++;
+      window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+      return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+    }
+
+    function notify(method, params) {
+      window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+    }
+
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent) return;
+      const message = event.data;
+      if (!message || message.jsonrpc !== "2.0") return;
+
+      if (message.id !== undefined && pending.has(message.id)) {
+        const task = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) task.reject(message.error);
+        else task.resolve(message.result);
+        return;
+      }
+
+      if (message.method === "ui/notifications/tool-result") {
+        render(message.params);
+      }
+    }, { passive: true });
+
+    window.addEventListener("openai:set_globals", (event) => {
+      render(event.detail?.globals?.toolOutput);
+    }, { passive: true });
+
+    if (window.openai?.toolOutput) render(window.openai.toolOutput);
+
+    request("ui/initialize", {
+      appInfo: { name: "elsewhere-webcam", version: "1.0.0" },
+      appCapabilities: {},
+      protocolVersion: "2026-01-26"
+    }).then(() => {
+      notify("ui/notifications/initialized", {});
+    }).catch(() => {
+      if (window.openai?.toolOutput) render(window.openai.toolOutput);
+    });
+  </script>
+</body>
+</html>"""
+
+
+@mcp.resource(
+    WEBCAM_WIDGET_URI,
+    name="webcam-view",
+    title="此刻的远方",
+    description="在聊天中直接显示一张实时公共摄像头画面。",
+    mime_type="text/html;profile=mcp-app",
+    meta=WEBCAM_WIDGET_META,
+)
+def webcam_widget() -> str:
+    return WEBCAM_WIDGET_HTML
+
 
 async def _snapshot_bytes(webcam_id):
     info = await get_webcam(webcam_id)
@@ -195,11 +424,42 @@ async def look(webcam_id: str) -> Image:
     return Image(data=data, format=image_format)
 
 
-@mcp.tool()
-async def show(webcam_id: str) -> Image:
-    """获取某个摄像头此刻的截图，直接以 MCP 图片内容返回给客户端。"""
-    _, data, image_format = await _snapshot_bytes(webcam_id)
-    return Image(data=data, format=image_format)
+@mcp.tool(
+    meta=SHOW_TOOL_META,
+    structured_output=True,
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def show(webcam_id: str) -> WebcamCard:
+    """把某个摄像头此刻的画面作为聊天内联图片卡片显示给用户。"""
+    info = await get_webcam(webcam_id)
+    snapshot = info.get("snapshot")
+    parsed = urlparse(snapshot or "")
+    if parsed.scheme != "https" or parsed.hostname != "images-webcams.windy.com":
+        raise ValueError("这个摄像头现在没有可安全显示的画面")
+
+    location_parts = []
+    for value in (info.get("city"), info.get("region"), info.get("country")):
+        if value and value not in location_parts:
+            location_parts.append(value)
+
+    page = info.get("page")
+    page_url = urlparse(page or "")
+    if page and (page_url.scheme != "https" or page_url.hostname != "www.windy.com"):
+        page = None
+
+    return WebcamCard(
+        webcam_id=str(info.get("id") or webcam_id),
+        title=info.get("title"),
+        location=", ".join(location_parts) or None,
+        snapshot=snapshot,
+        page=page,
+        last_updated=info.get("last_updated"),
+    )
 
 
 def _sun_points(event, now):
