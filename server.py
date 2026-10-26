@@ -4,6 +4,7 @@ import base64
 import asyncio
 import time
 import datetime as dt
+import logging
 
 import httpx
 import jwt
@@ -12,12 +13,12 @@ from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 
+# Windy snapshot URLs may carry short-lived image tokens in their query string.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 API_KEY = os.environ["WINDY_API_KEY"]
 BASE = "https://api.windy.com/webcams/api/v3"
 INCLUDE = "location,images,player,urls,categories"
-GH_TOKEN = os.getenv("GH_TOKEN")
-GH_REPO = os.getenv("GH_REPO")  # 公开仓库，如 yourname/your-snaps，show 工具用
-
 class WorkOSTokenVerifier:
     def __init__(self, issuer: str, resource: str, allowed_users: set[str]):
         self.issuer = issuer
@@ -99,15 +100,53 @@ def _slim(w):
     }
 
 
+MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+SNAPSHOT_TYPES = {
+    "image/jpeg": "jpeg",
+    "image/png": "png",
+    "image/webp": "webp",
+}
+
+
 async def _snapshot_bytes(webcam_id):
     info = await get_webcam(webcam_id)
     url = info.get("snapshot")
     if not url:
         raise ValueError("这个摄像头现在没有可用截图")
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
-        r = await c.get(url)
-        r.raise_for_status()
-    return info, r.content
+    if not url.startswith("https://"):
+        raise ValueError("摄像头截图地址不是安全的 HTTPS 地址")
+    try:
+        timeout = httpx.Timeout(20.0, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            async with c.stream("GET", url) as r:
+                if r.status_code >= 400:
+                    raise ValueError(f"摄像头截图请求失败（HTTP {r.status_code}）")
+                if r.url.scheme != "https":
+                    raise ValueError("摄像头截图重定向到非 HTTPS 地址")
+                mime_type = r.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                image_format = SNAPSHOT_TYPES.get(mime_type)
+                if image_format is None:
+                    raise ValueError("摄像头截图返回了不支持的图片类型")
+                length = r.headers.get("content-length")
+                if length:
+                    try:
+                        size = int(length)
+                    except ValueError:
+                        raise ValueError("摄像头截图响应长度无效") from None
+                    if size > MAX_SNAPSHOT_BYTES:
+                        raise ValueError("摄像头截图超过大小限制")
+                data = bytearray()
+                async for chunk in r.aiter_bytes(chunk_size=64 * 1024):
+                    if len(data) + len(chunk) > MAX_SNAPSHOT_BYTES:
+                        raise ValueError("摄像头截图超过大小限制")
+                    data.extend(chunk)
+        return info, bytes(data), image_format
+    except ValueError:
+        raise
+    except httpx.TimeoutException:
+        raise ValueError("获取摄像头截图超时") from None
+    except httpx.HTTPError:
+        raise ValueError("获取摄像头截图失败") from None
 
 
 @mcp.tool()
@@ -151,37 +190,16 @@ async def get_webcam(webcam_id: str) -> dict:
 
 @mcp.tool()
 async def look(webcam_id: str) -> Image:
-    """直接看一眼某个摄像头此刻的画面（返回图片本身，只有 Claude 自己能看见）。"""
-    _, data = await _snapshot_bytes(webcam_id)
-    return Image(data=data, format="jpeg")
+    """直接返回某个摄像头此刻的截图图片内容。"""
+    _, data, image_format = await _snapshot_bytes(webcam_id)
+    return Image(data=data, format=image_format)
 
 
 @mcp.tool()
-async def show(webcam_id: str) -> dict:
-    """把某个摄像头此刻的画面给用户看。返回 image_url（cdn.jsdelivr.net 链接）和一段 html，
-    能渲染 html 的客户端直接放进去就能显示图片。想让用户看到画面时用这个，不要用 look。"""
-    if not GH_TOKEN or not GH_REPO:
-        raise ValueError("服务器上没配置 GH_TOKEN / GH_REPO")
-    info, data = await _snapshot_bytes(webcam_id)
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    path = f"snaps/{stamp}-{webcam_id}.jpg"
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.put(
-            f"https://api.github.com/repos/{GH_REPO}/contents/{path}",
-            headers={"Authorization": f"Bearer {GH_TOKEN}",
-                     "Accept": "application/vnd.github+json"},
-            json={"message": f"snap {webcam_id}",
-                  "content": base64.b64encode(data).decode()},
-        )
-        r.raise_for_status()
-        sha = r.json()["commit"]["sha"]
-    url = f"https://cdn.jsdelivr.net/gh/{GH_REPO}@{sha}/{path}"
-    place = " · ".join(x for x in (info.get("title"), info.get("country")) if x)
-    return {
-        "image_url": url,
-        "place": place,
-        "html": f'<img src="{url}" alt="{place}" style="width:100%;border-radius:12px;display:block">',
-    }
+async def show(webcam_id: str) -> Image:
+    """获取某个摄像头此刻的截图，直接以 MCP 图片内容返回给客户端。"""
+    _, data, image_format = await _snapshot_bytes(webcam_id)
+    return Image(data=data, format=image_format)
 
 
 def _sun_points(event, now):

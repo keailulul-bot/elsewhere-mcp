@@ -35,7 +35,7 @@ An MCP server that lets an AI look at the world: public webcams everywhere, wher
 | `list_categories()` | 列出摄像头类别（海滩、山、城市……） |
 | `get_webcam(webcam_id)` | 摄像头详情、最新截图、直播链接 |
 | `look(webcam_id)` | 返回此刻画面的图片本身，给 AI 自己看 |
-| `show(webcam_id)` | 把画面传到你的公开仓库，返回 jsDelivr 图片链接，给用户看 |
+| `show(webcam_id)` | 直接返回摄像头最新截图的 MCP 图片内容 |
 | `where_sun_is(event)` | 找此刻正在日出（sunrise）或日落（sunset）的地方的摄像头 |
 
 **追动物 · Wildlife tracking**（数据来自 Movebank，需要自己的免费账号）
@@ -74,7 +74,7 @@ venv/bin/python server.py
 1. 在 GitHub 打开本仓库，点击 **Fork** 到自己的账号，将本地修改后的文件复制进 Fork 并提交。Render 的 Repository 选你的 Fork；关闭 Auto-Deploy，确认配置后再手动部署。不要把 `.env` 或密钥提交到 GitHub。
 2. 在 WorkOS 创建 AuthKit 环境，先创建自己的 AuthKit 应用用户（或先通过 AuthKit 注册一次），从 Users 页面记录该用户的 **user ID**（不是邮箱），然后在 Authentication 中关闭公开 Sign up。WorkOS Dashboard 管理员账号与 AuthKit 应用用户是不同身份。即使其他用户存在，服务端仍只接受 `WORKOS_ALLOWED_USER_IDS` 白名单中的 ID。
 3. 在 WorkOS **Connect → Configuration** 启用 Client ID Metadata Document (CIMD)。将 `https://你的服务名.onrender.com/mcp` 添加为 Resource Indicator；可将它设为 default。若 ChatGPT 连接页面选择 DCR，则也要启用 Dynamic Client Registration。WorkOS 托管授权、令牌、注册与 PKCE 端点，本服务只验证令牌。
-4. Render Web Service 使用 Python 3.11+、Free、`pip install -r requirements.txt`、`python server.py`。环境变量：`WINDY_API_KEY`、`HOST=0.0.0.0`、`PORT=10000`、`WORKOS_ISSUER=https://你的-authkit-域名`、`MCP_PUBLIC_URL=https://你的服务名.onrender.com/mcp`、`WORKOS_ALLOWED_USER_IDS=user_...`。`WORKOS_ISSUER` 必须与 WorkOS discovery 的 `issuer` 完全相同。可选的 `GH_TOKEN`/`GH_REPO` 和 Movebank 凭据只放 Render 环境变量中。
+4. Render Web Service 使用 Python 3.11+、Free、`pip install -r requirements.txt`、`python server.py`。环境变量：`WINDY_API_KEY`、`HOST=0.0.0.0`、`PORT=10000`、`WORKOS_ISSUER=https://你的-authkit-域名`、`MCP_PUBLIC_URL=https://你的服务名.onrender.com/mcp`、`WORKOS_ALLOWED_USER_IDS=user_...`。`WORKOS_ISSUER` 必须与 WorkOS discovery 的 `issuer` 完全相同。Movebank 凭据（如使用）只放 Render 环境变量中。
 5. 部署并确认 `/mcp` 无令牌返回 401 且 `WWW-Authenticate` 指向 OAuth metadata。ChatGPT 自定义 MCP 选择 **OAuth**，地址填写 `https://你的服务名.onrender.com/mcp`；优先选 CIMD。首次连接按 WorkOS 页面登录授权。
 
 服务使用官方 MCP Python SDK 发布 protected resource metadata；WorkOS 发布 authorization server metadata，包含注册端点和 PKCE `S256`。所有 HTTP 工具请求必须通过 WorkOS JWKS 签名、issuer、audience、到期时间、`openid` scope 和 user ID 白名单校验。WorkOS CIMD/DCR 客户端默认只获得标准 OIDC scopes，因此这里用 `openid` 加服务端 user ID 白名单作为单人权限边界，不依赖邮箱或自定义 scope。修改白名单后重启服务；已签发令牌也会立即被新白名单拒绝。
@@ -128,7 +128,7 @@ claude mcp add elsewhere -e TRANSPORT=stdio -e WINDY_API_KEY=你的key -- /你�
 - 动物追踪数据：[Movebank](https://www.movebank.org) 及各研究的数据所有者。引用或发布前请查看每个研究的许可证
 - 天气：[Open-Meteo](https://open-meteo.com)（CC BY 4.0）
 
-`show` 会把截图上传到**你自己的公开仓库**，请确认这样做符合 Windy 和摄像头所有者的条款。
+`look` 和 `show` 都直接返回截图图片内容；客户端是否在聊天界面渲染图片取决于客户端对 MCP ImageContent 的支持。使用摄像头数据时请遵守 Windy 和摄像头所有者的条款。
 
 ---
 
