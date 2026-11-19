@@ -151,6 +151,7 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
     #frame {
       display: none;
       width: 100%;
+      aspect-ratio: 16 / 9;
       border-radius: 14px;
       overflow: hidden;
       background: transparent;
@@ -161,8 +162,7 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
     #image {
       display: block;
       width: 100%;
-      height: auto;
-      max-height: 75vh;
+      height: 100%;
       object-fit: cover;
       border: 0;
       border-radius: 14px;
@@ -175,15 +175,20 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
     const frameEl = document.getElementById("frame");
     const imageEl = document.getElementById("image");
     let shownSnapshot = "";
+    let lastHeight = 0;
 
     function safeDataImageUri(value) {
       const s = String(value || "").trim();
       return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(s) ? s : null;
     }
 
-    function notifySize() {
-      const h = Math.ceil(frameEl.getBoundingClientRect().height || 0);
-      if (!h) return;
+    function notifySize(force = false) {
+      const rect = frameEl.getBoundingClientRect();
+      const h = Math.ceil(rect.height || 0);
+      const w = Math.ceil(rect.width || 0);
+      if (h <= 0) return;
+      if (!force && h === lastHeight) return;
+      lastHeight = h;
       try {
         window.openai?.notifyIntrinsicHeight?.(h);
       } catch (_) {}
@@ -191,7 +196,7 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
         window.parent.postMessage({
           jsonrpc: "2.0",
           method: "ui/notifications/size-changed",
-          params: { height: h }
+          params: w > 0 ? { width: w, height: h } : { height: h }
         }, "*");
       } catch (_) {}
     }
@@ -204,13 +209,20 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
       if (!snapshot || snapshot === shownSnapshot) return;
 
       shownSnapshot = snapshot;
+      frameEl.classList.add("ready");
       imageEl.onload = () => {
+        if (imageEl.naturalWidth > 0 && imageEl.naturalHeight > 0) {
+          frameEl.style.aspectRatio = `${imageEl.naturalWidth} / ${imageEl.naturalHeight}`;
+        }
         frameEl.classList.add("ready");
-        notifySize();
+        notifySize(true);
       };
       imageEl.src = snapshot;
-      frameEl.classList.add("ready");
-      notifySize();
+      notifySize(true);
+    }
+
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(() => notifySize()).observe(frameEl);
     }
 
     let nextRequestId = 1;
@@ -248,7 +260,7 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
       render(event.detail?.globals?.toolOutput);
     }, { passive: true });
 
-    window.addEventListener("resize", notifySize, { passive: true });
+    window.addEventListener("resize", () => notifySize(true), { passive: true });
 
     if (window.openai?.toolOutput) render(window.openai.toolOutput);
 
@@ -258,8 +270,10 @@ WEBCAM_WIDGET_HTML = r"""<!doctype html>
       protocolVersion: "2026-01-26"
     }).then(() => {
       notify("ui/notifications/initialized", {});
+      notifySize(true);
     }).catch(() => {
       if (window.openai?.toolOutput) render(window.openai.toolOutput);
+      notifySize(true);
     });
   </script>
 </body>
