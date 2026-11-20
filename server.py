@@ -409,6 +409,20 @@ async def show(webcam_id: str) -> WebcamCard:
     )
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    ),
+)
+async def show_raw_image(webcam_id: str) -> Image:
+    """临时测试工具：直接返回摄像头截图的 MCP 原生 Image content（无 widget 卡片）。"""
+    _, data, image_format = await _snapshot_bytes(webcam_id)
+    return Image(data=data, format=image_format)
+
+
 def _sun_points(event, now):
     doy = now.timetuple().tm_yday
     decl = math.radians(23.44) * math.sin(math.radians(360 / 365 * (doy - 81)))
